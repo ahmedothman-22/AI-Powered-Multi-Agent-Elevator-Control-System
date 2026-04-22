@@ -35,4 +35,4 @@ The cost is calculated based on:
 ## 🏃‍♂️ How to Run
 1. Clone this repository:
    ```bash
-   git clone [https://github.com/ahmedothman-22/AI-Powered-Multi-Agent-Elevator-Control-System.git](https://github.com/ahmedothman-22/AI-Powered-Multi-Agent-Elevator-Control-System.git)
+   git clone [AI-Powered Multi-Agent Elevator Control System](https://github.com/ahmedothman-22/AI-Powered-Multi-Agent-Elevator-Control-System.git)
