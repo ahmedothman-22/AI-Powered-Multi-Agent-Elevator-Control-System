@@ -171,5 +171,4 @@ The system tracks in real time:
 - Tkinter (built-in with Python)
 
 ### Run the project:
-`bash
-https://github.com/ahmedothman-22/AI-Powered-Multi-Agent-Elevator-Control-System.git
+git clone https://github.com/ahmedothman-22/AI-Powered-Multi-Agent-Elevator-Control-System.git
