@@ -159,6 +159,8 @@ The system tracks in real time:
 - Queue size
 - Floor heatmap intensity
 - System uptime
+-
+-
 
 ---
 
