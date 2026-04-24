@@ -1,262 +1,335 @@
+"""
+Elevator Dispatch System - A* Edition v8.0
+===========================================
+    Initial State : (current_floor, frozenset(all_requested_floors))
+    Actions : move to any floor in the unvisited set
+    Transition : (floor, remaining) -> (next_floor, remaining - {next_floor})
+    Step Cost : |current_floor - next_floor| (floors travelled)
+    Goal Test : remaining == ∅
+    Path Cost : total floors travelled to serve all requests
+Optimal search : A* with admissible heuristic h(n) = span + nearest_extreme
+"""
 import tkinter as tk
-import time
+import time, heapq, itertools, random
 from collections import deque
 
+# ╔══════════════════════════════════════════════════════════╗
+# ║ SEARCH FORMULATION ║
+# ╚══════════════════════════════════════════════════════════╝
+class ElevatorProblem:
+    """
+    Problem formulation for a single elevator car.
+    State
+    -----
+    A 2-tuple (current_floor : int, unvisited : frozenset[int])
+    representing where the car is and which requested floors
+    have not yet been visited.
+    Initial State
+    -------------
+    Set at construction time from the car's current position
+    and the full set of pending requests.
+    Actions
+    -------
+    For each floor f in unvisited, the car may move directly to f.
+    (We model non-stop movement; intermediate floors are not modelled
+    as separate actions because the cost function captures distance.)
+    Transition Model
+    ----------------
+    RESULT( (cur, unvisited), f ) = (f, unvisited - {f})
+    Step Cost
+    ---------
+    |cur - f| (number of floors traversed)
+    Goal Test
+    ---------
+    unvisited == ∅
+    Heuristic h(n) — admissible & consistent
+    -------------------------------------------
+    Lower-bound on remaining travel:
+        span = max(unvisited) - min(unvisited)
+        nearest_edge = min( |cur - min|, |cur - max| )
+        h = span + nearest_edge
+    Proof of admissibility: the car must cover the full span of
+    outstanding floors at least once, and must first travel to
+    the nearer extreme — so h never over-estimates true cost.
+    """
+    def __init__(self, initial_floor: int, requested: set):
+        self.initial_state = (initial_floor, frozenset(requested))
+    def is_goal(self, state: tuple) -> bool:
+        _, unvisited = state
+        return len(unvisited) == 0
+    def successors(self, state: tuple):
+        cur, unvisited = state
+        result = []
+        for nf in unvisited:
+            new_state = (nf, frozenset(f for f in unvisited if f != nf))
+            step_cost = abs(cur - nf)
+            result.append((new_state, step_cost))
+        return result
+    def h(self, state: tuple) -> float:
+        cur, unvisited = state
+        if not unvisited:
+            return 0.0
+        lo, hi = min(unvisited), max(unvisited)
+        span = hi - lo
+        nearest = min(abs(cur - lo), abs(cur - hi))
+        return float(span + nearest)
+
+# ╔══════════════════════════════════════════════════════════╗
+# ║ A* SEARCH ║
+# ╚══════════════════════════════════════════════════════════╝
+def astar(problem: ElevatorProblem):
+    """A* Tree Search with duplicate-state pruning via a reached table."""
+    start = problem.initial_state
+    if problem.is_goal(start):
+        return [], 0.0
+    tie = itertools.count()
+    reached = {start: 0.0}
+    frontier = []
+    heapq.heappush(frontier, (problem.h(start), next(tie), 0.0, start, []))
+    while frontier:
+        _, _, g, state, path = heapq.heappop(frontier)
+        if g > reached.get(state, float('inf')):
+            continue
+        if problem.is_goal(state):
+            return path, g
+        for child, cost in problem.successors(state):
+            new_g = g + cost
+            if new_g < reached.get(child, float('inf')):
+                reached[child] = new_g
+                new_f = new_g + problem.h(child)
+                heapq.heappush(frontier, (new_f, next(tie), new_g, child, path + [child[0]]))
+    return [], float('inf')
+
+# ╔══════════════════════════════════════════════════════════╗
+# ║ ELEVATOR CAR ║
+# ╚══════════════════════════════════════════════════════════╝
 class Elevator:
-    def __init__(self, id, canvas, x_pos):
-        self.id = id
-        self.logical_floor = 0      
-        self.display_floor = 0     
-        self.pixel_y = 450.0
-        self.direction = 0         
-        self.up_stops = []
-        self.down_stops = []
-        self.total_dist = 0.0
-        self.served_count = 0
-        self.capacity = 8
-
+    FH = 48
+    BASE_Y = 530
+    SPEED = 4
+    MAX_PENDING = 8
+    def __init__(self, cid: int, canvas: tk.Canvas, x: int):
+        self.cid = cid
         self.canvas = canvas
-        self.rect = canvas.create_rectangle(x_pos, 450, x_pos+50, 500, fill="#34495e", outline="#ecf0f1", width=2)
-        self.text = canvas.create_text(x_pos+25, 475, text=f"E{id}", fill="white", font=("Arial", 10, "bold"))
-        self.status_ui = canvas.create_text(x_pos+25, 515, text="IDLE", fill="#2ecc71", font=("Arial", 8))
-        self.path_line = canvas.create_line(x_pos+25, 450, x_pos+25, 450, fill="#e94560", dash=(4, 2))
-
-    def get_load(self):
-        return len(self.up_stops) + len(self.down_stops)
-
-    def has_destination(self, floor):
-        return floor in self.up_stops or floor in self.down_stops
-
-    def estimated_travel_distance(self, new_floor):
-        """Heuristic"""
-        if self.get_load() == 0:
-            return abs(self.logical_floor - new_floor)
-
-        if self.direction == 1:  
-            if new_floor >= self.logical_floor:
-                return new_floor - self.logical_floor
-            farthest = max(self.up_stops) if self.up_stops else self.logical_floor
-            return (farthest - self.logical_floor) + (farthest - new_floor)
-        
-        elif self.direction == -1: 
-            if new_floor <= self.logical_floor:
-                return self.logical_floor - new_floor
-            farthest = min(self.down_stops) if self.down_stops else self.logical_floor
-            return (self.logical_floor - farthest) + (new_floor - farthest)
-        
-        return abs(self.logical_floor - new_floor)
-
-    def add_destination(self, floor):
-        if floor == self.logical_floor:
-            if self.direction == 0:
-                self.served_count += 1
-                self.canvas.itemconfig(self.rect, fill="#2ecc71")
-                self.canvas.after(280, lambda: self.canvas.itemconfig(self.rect, fill="#34495e"))
+        self.x = x
+        self.floor = 0
+        self.disp_floor = 0
+        self.py = float(self.BASE_Y)
+        self.pending = set()
+        self.path = []
+        self.path_cost = 0.0
+        self.dist = 0.0
+        self.served = 0
+        self._cache = None
+        colors = [("#1e88e5", "#64b5f6"), ("#43a047", "#81c784"), ("#8e24aa", "#ba68c8")]
+        self.body_c, self.accent = colors[(cid-1) % 3]
+        self.body = canvas.create_rectangle(x, self.BASE_Y, x+54, self.BASE_Y+54,
+                                           fill=self.body_c, outline=self.accent, width=3)
+        self.label = canvas.create_text(x+27, self.BASE_Y+27, text=str(cid),
+                                       fill="white", font=("Arial", 16, "bold"))
+        self.floor_label = canvas.create_text(x+27, self.BASE_Y-12, text="0",
+                                             fill="white", font=("Arial", 10, "bold"))
+        self.arrow = canvas.create_text(x+27, self.BASE_Y+68, text="·",
+                                       fill=self.accent, font=("Arial", 14, "bold"))
+        self.path_line = canvas.create_line(x+27, self.BASE_Y+27, x+27, self.BASE_Y+27,
+                                           fill="#ff5252", dash=(4, 2), width=2)
+    def _fy(self, f):
+        return self.BASE_Y - f * self.FH
+    def add(self, floor: int):
+        if len(self.pending) >= self.MAX_PENDING:
+            return False
+        if floor in self.pending:
             return True
-
-        if self.has_destination(floor): return True
-
-        added = False
-        if floor > self.logical_floor:
-            if floor not in self.up_stops:
-                self.up_stops.append(floor)
-                self.up_stops.sort()
-                added = True
-        elif floor < self.logical_floor:
-            if floor not in self.down_stops:
-                self.down_stops.append(floor)
-                self.down_stops.sort(reverse=True)
-                added = True
-
-        if self.direction == 0 and added:
-            self.direction = 1 if self.up_stops else -1
-        return added
-
+        self.pending.add(floor)
+        self._replan()
+        return True
+    def _replan(self):
+        if not self.pending:
+            self.path = []
+            self.path_cost = 0.0
+            self._cache = None
+            return
+        key = (self.floor, frozenset(self.pending))
+        if key == self._cache:
+            return
+        self.path, self.path_cost = astar(ElevatorProblem(self.floor, self.pending))
+        self._cache = key
+    def load(self):
+        return len(self.pending)
     def step(self):
-        # LOOK Algorithm State Machine
-        if self.direction == 1 and not self.up_stops:
-            self.direction = -1 if self.down_stops else 0
-        elif self.direction == -1 and not self.down_stops:
-            self.direction = 1 if self.up_stops else 0
-        elif self.direction == 0:
-            if self.up_stops: self.direction = 1
-            elif self.down_stops: self.direction = -1
-
-        target = self.up_stops[0] if self.direction == 1 else (self.down_stops[0] if self.direction == -1 else None)
-        
-        arrival = False
-        if target is not None:
-            target_y = 450 - (target * 45)
-            if abs(self.pixel_y - target_y) > 2:
-                move = -4 if self.direction == 1 else 4
-                self.pixel_y += move
-                self.total_dist += abs(move) / 45
-                self.canvas.move(self.rect, 0, move)
-                self.canvas.move(self.text, 0, move)
-                self.display_floor = int(round((450 - self.pixel_y) / 45))
-                # تحديث خط المسار
-                tx = self.canvas.coords(self.text)[0]
-                self.canvas.coords(self.path_line, tx, self.pixel_y + 25, tx, target_y + 25)
-            else:
-                self.pixel_y = target_y
-                self.logical_floor = target
-                self.display_floor = target
-                if self.direction == 1: self.up_stops.pop(0)
-                else: self.down_stops.pop(0)
-                self.served_count += 1
-                arrival = True
-                self.canvas.itemconfig(self.rect, fill="#2ecc71")
-                self.canvas.after(280, lambda: self.canvas.itemconfig(self.rect, fill="#34495e"))
+        if not self.path:
+            cx = self.x + 27
+            self.canvas.coords(self.path_line, cx, self.py+27, cx, self.py+27)
+            self.canvas.itemconfig(self.arrow, text="·")
+            return False
+        tgt = self.path[0]
+        tgt_py = self._fy(tgt)
+        delta = tgt_py - self.py
+        if abs(delta) > 3:
+            move = 4 if delta > 0 else -4
+            self.py += move
+            self.dist += abs(move) / self.FH
+            self.disp_floor = int(round((self.BASE_Y - self.py) / self.FH))
+            self._update_graphics(tgt_py)
         else:
-            self.canvas.coords(self.path_line, 0, 0, 0, 0)
+            self.py = tgt_py
+            self.floor = self.disp_floor = tgt
+            self.path.pop(0)
+            self.pending.discard(tgt)
+            self.served += 1
+            self._cache = None
+            self._update_graphics(None)
+            self.canvas.itemconfig(self.body, fill="#facc15")
+            self.canvas.after(280, lambda: self.canvas.itemconfig(self.body, fill=self.body_c))
+        return True
+    def _update_graphics(self, tgt_py):
+        cx = self.x + 27
+        self.canvas.coords(self.body, self.x, self.py, self.x+54, self.py+54)
+        self.canvas.coords(self.label, cx, self.py + 27)
+        self.canvas.coords(self.floor_label, cx, self.py - 12)
+        self.canvas.itemconfig(self.floor_label, text=str(self.disp_floor))
+        if tgt_py is not None:
+            self.canvas.coords(self.path_line, cx, self.py+27, cx, tgt_py+27)
+        else:
+            self.canvas.coords(self.path_line, cx, self.py+27, cx, self.py+27)
+        arrow = "▲" if self.path and self.path[0] > self.disp_floor else "▼" if self.path else "·"
+        self.canvas.itemconfig(self.arrow, text=arrow)
+    def reset(self):
+        self.pending.clear()
+        self.path.clear()
+        self.floor = self.disp_floor = 0
+        self.py = float(self.BASE_Y)
+        self.dist = self.served = 0.0
+        self._cache = None
+        self._update_graphics(None)
 
-        self.update_ui()
-        return arrival
-
-    def update_ui(self):
-        icon = "IDLE" if self.direction == 0 else ("↑" if self.direction == 1 else "↓")
-        color = "#2ecc71" if self.direction == 0 else "#f1c40f"
-        load = self.get_load()
-        self.canvas.itemconfig(self.status_ui, text=f"L{self.display_floor} {icon} [{load}]", fill=color)
-
-
-class UltimateSystemV7_3:
+# ╔══════════════════════════════════════════════════════════╗
+# ║ MAIN APPLICATION ║
+# ╚══════════════════════════════════════════════════════════╝
+class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("AI Elevator - Ultimate Edition Final")
-        self.root.configure(bg="#1a1a2e")
-        
-        self.request_queue = deque()
-        self.floor_heatmap = {i: 0 for i in range(11)}
+        self.root.title("AI Elevator System v8.0")
+        self.root.configure(bg="#0a0e1a")
+        self.root.resizable(True, True)
+        self.root.state('zoomed')
+        self.queue = deque()
+        self.heat = {i: 0 for i in range(11)}
         self.start_time = time.time()
-        self.log_messages = []
-
-        self.canvas = tk.Canvas(root, width=530, height=560, bg="#1a1a2e", highlightthickness=0)
-        self.canvas.pack(side=tk.LEFT, padx=20)
-        
+        self.canvas = tk.Canvas(root, bg="#0a0e1a", highlightthickness=0)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=20, pady=20)
+        self._draw_building()
+        self.cars = [Elevator(i+1, self.canvas, 140 + i * 170) for i in range(3)]
+        self._create_sidebar()
+        self._loop()
+    def _draw_building(self):
         for i in range(11):
-            y = 500 - (i * 45)
-            self.canvas.create_line(70, y, 460, y, fill="#2c3e50")
-            self.canvas.create_text(35, y-22, text=f"L{i}", fill="#ecf0f1")
-
-        self.elevators = [Elevator(i+1, self.canvas, 120 + (i*125)) for i in range(3)]
-        
-        # Sidebar Panel
-        self.sidebar = tk.Frame(root, bg="#16213e", padx=20, pady=10)
-        self.sidebar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        tk.Label(self.sidebar, text="AI ELEVATOR v7.3 FINAL", fg="#e94560", bg="#16213e", font=("Arial", 14, "bold")).pack(pady=10)
-        
-        self.stats_label = tk.Label(self.sidebar, text="", fg="#00ff00", bg="#0f1b2e", font=("Courier", 9), justify=tk.LEFT, padx=10, pady=10)
-        self.stats_label.pack(fill=tk.X)
-
-        tk.Label(self.sidebar, text="FLOOR HEATMAP", fg="#e94560", bg="#16213e", font=("Arial", 10, "bold")).pack(pady=(15,5))
-        self.heatmap_label = tk.Label(self.sidebar, text="", fg="#00aaff", bg="#0f1b2e", font=("Courier", 8), justify=tk.LEFT, padx=10, pady=8)
-        self.heatmap_label.pack(fill=tk.X)
-
-        tk.Label(self.sidebar, text="EVENT LOG", fg="#e94560", bg="#16213e", font=("Arial", 10, "bold")).pack(pady=(15,5))
-        self.log_frame = tk.Frame(self.sidebar, bg="#16213e")
-        self.log_frame.pack(fill=tk.X)
-        self.log_text = tk.Text(self.log_frame, height=10, width=32, bg="#0f1b2e", fg="#00ffaa", font=("Consolas", 9))
-        self.log_text.pack(side=tk.LEFT, fill=tk.X)
-
-        tk.Button(self.sidebar, text="EMERGENCY STOP", bg="#c0392b", fg="white", command=self.emergency).pack(fill=tk.X, pady=8)
-        tk.Button(self.sidebar, text="RESET ALL", bg="#7f8c8d", fg="white", command=self.reset_all).pack(fill=tk.X, pady=5)
-
-        tk.Label(self.sidebar, text="CALL FROM FLOOR", fg="white", bg="#16213e", font=("Arial", 10, "bold")).pack(pady=(15,8))
-        for i in range(10, -1, -1):
-            tk.Button(self.sidebar, text=f"Floor {i}", width=18, bg="#0f3460", fg="white", 
-                      command=lambda f=i: self.add_request(f)).pack(pady=2)
-
-        self.master_loop()
-
-    def add_log(self, message):
-        ts = time.strftime("%H:%M:%S")
-        self.log_messages.append(f"[{ts}] {message}")
-        if len(self.log_messages) > 12: self.log_messages.pop(0)
-        self.log_text.delete(1.0, tk.END)
-        self.log_text.insert(tk.END, "\n".join(self.log_messages))
-        self.log_text.see(tk.END)
-
-    def add_request(self, floor):
-        already_assigned = any(ev.has_destination(floor) for ev in self.elevators)
-        already_queued = any(r['floor'] == floor for r in self.request_queue)
-        if not already_assigned and not already_queued:
-            self.floor_heatmap[floor] += 1
-            self.request_queue.append({'floor': floor, 'time': time.time()})
-            self.add_log(f"New Call → Floor {floor}")
-
-    def emergency(self):
-        for ev in self.elevators:
-            ev.up_stops.clear(); ev.down_stops.clear(); ev.direction = 0
-        self.request_queue.clear()
-        self.add_log("🚨 EMERGENCY STOP")
-
-    def reset_all(self):
-        for ev in self.elevators:
-            ev.up_stops.clear(); ev.down_stops.clear(); ev.direction = 0
-            ev.total_dist = 0.0; ev.served_count = 0; ev.logical_floor = 0
-            ev.pixel_y = 450.0
-            self.canvas.coords(ev.rect, 120 + ((ev.id-1)*125), 450, 120 + ((ev.id-1)*125)+50, 500)
-            self.canvas.coords(ev.text, 120 + ((ev.id-1)*125)+25, 475)
-        self.request_queue.clear()
-        self.floor_heatmap = {i: 0 for i in range(11)}
-        self.start_time = time.time()
-        self.add_log("System Reset")
-
-    def calculate_cost(self, ev, floor, wait_time):
-        """Heuristic Cost Function"""
-        if ev.get_load() >= ev.capacity: return float('inf')
-        dist = ev.estimated_travel_distance(floor)
-        load_penalty = ev.get_load() * 4.5
-        alignment_bonus = 10 if (ev.direction == 1 and floor >= ev.logical_floor) or (ev.direction == -1 and floor <= ev.logical_floor) else 1
-        aging = min(wait_time * 1.5, 15)
-        dir_penalty = 8 if ev.direction == 0 and ev.get_load() > 0 else 0
-        return dist + load_penalty - alignment_bonus + dir_penalty - aging
-
-    def dispatch_logic(self):
-        max_per_tick = max(2, min(len(self.request_queue), len(self.elevators) * 2))
-        processed = 0
-        while self.request_queue and processed < max_per_tick:
-            req = self.request_queue[0]
-            floor = req['floor']; wait_time = time.time() - req['time']
-            best_ev = None; min_cost = float('inf')
-            for ev in self.elevators:
-                cost = self.calculate_cost(ev, floor, wait_time)
-                if cost < min_cost: min_cost = cost; best_ev = ev
-            if best_ev:
-                best_ev.add_destination(floor)
-                self.request_queue.popleft()
-                self.add_log(f"F{floor} → E{best_ev.id} (Cost: {min_cost:.1f})")
-                processed += 1
-            else: break
-
-    def update_heatmap_ui(self):
-        max_val = max(self.floor_heatmap.values()) or 1
-        lines = []
+            y = 530 - i * 48
+            self.canvas.create_line(90, y, 620, y, fill="#1e2a44", width=2)
+            self.canvas.create_text(55, y, text=f"L{i}", fill="#8899bb", font=("Arial", 11, "bold"))
+    def _create_sidebar(self):
+        container = tk.Frame(self.root, bg="#111827", width=250)
+        container.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas = tk.Canvas(container, bg="#111827", highlightthickness=0)
+        scrollbar = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        scroll_frame = tk.Frame(canvas, bg="#111827")
+        scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        tk.Label(scroll_frame, text="AI ELEVATOR v8.0", fg="#60a5fa", bg="#111827",
+                 font=("Arial", 16, "bold")).pack(pady=(0,15))
+        self.stats_var = tk.StringVar()
+        tk.Label(scroll_frame, textvariable=self.stats_var, fg="#34d399", bg="#1f2937",
+                 font=("Courier", 9), justify="left", padx=12, pady=12).pack(fill=tk.X)
+        tk.Label(scroll_frame, text="FLOOR HEATMAP", fg="#f472b6", bg="#111827",
+                 font=("Arial", 10, "bold")).pack(pady=(25,8))
+        self.heat_var = tk.StringVar()
+        tk.Label(scroll_frame, textvariable=self.heat_var, fg="#67e8f9", bg="#1f2937",
+                 font=("Courier", 9), justify="left").pack(fill=tk.X, pady=5)
+        tk.Button(scroll_frame, text="Random Traffic", bg="#1e40af", fg="white",
+                  command=self.random_calls).pack(fill=tk.X, pady=8)
+        tk.Button(scroll_frame, text="Emergency Stop", bg="#b91c1c", fg="white",
+                  command=self.emergency).pack(fill=tk.X, pady=5)
+        tk.Button(scroll_frame, text="Full Reset", bg="#374151", fg="white",
+                  command=self.full_reset).pack(fill=tk.X)
+        tk.Label(scroll_frame, text="Call From Floor", fg="#94a3b8", bg="#111827",
+                 font=("Arial", 10, "bold")).pack(pady=(30,10))
         for f in range(10, -1, -1):
-            count = self.floor_heatmap[f]
-            if count > 0:
-                bar = "█" * int((count / max_val) * 12)
-                lines.append(f"L{f:2d} {bar:<12} {count}")
-        self.heatmap_label.config(text="\n".join(lines) if lines else "No calls yet")
-
-    def master_loop(self):
-        served = sum(e.served_count for e in self.elevators)
-        dist = sum(e.total_dist for e in self.elevators)
-        eff = (served / dist) if dist > 0 else 0.0
-        stats = (f"Uptime: {int(time.time()-self.start_time)}s\n"
-                 f"Served: {served}\n"
-                 f"Total Dist: {dist:.1f}F\n"
-                 f"Efficiency: {eff:.2f} R/F\n"
-                 f"Pending: {len(self.request_queue)}")
-        self.stats_label.config(text=stats)
-        self.update_heatmap_ui()
-        for ev in self.elevators: ev.step()
-        if self.request_queue: self.dispatch_logic()
-        self.root.after(40, self.master_loop)
+            tk.Button(scroll_frame, text=f"Floor {f}", bg="#1e2937", fg="#cbd5e1",
+                      command=lambda fl=f: self.call_floor(fl)).pack(pady=3, fill=tk.X)
+    def call_floor(self, floor):
+        if any(floor in c.pending for c in self.cars) or any(r['floor'] == floor for r in self.queue):
+            return
+        self.heat[floor] += 1
+        self.queue.append({'floor': floor, 'time': time.time()})
+    def random_calls(self):
+        for _ in range(random.randint(4, 9)):
+            self.call_floor(random.randint(0, 10))
+    def emergency(self):
+        for c in self.cars:
+            c.pending.clear()
+            c.path.clear()
+        self.queue.clear()
+    def full_reset(self):
+        for c in self.cars:
+            c.reset()
+        self.queue.clear()
+        self.heat = {i: 0 for i in range(11)}
+        self.start_time = time.time()
+    def _dispatch(self):
+        if not self.queue:
+            return
+        req = self.queue[0]
+        floor = req['floor']
+        wait = time.time() - req['time']
+        best_car = None
+        best_cost = float('inf')
+        for car in self.cars:
+            if car.load() >= Elevator.MAX_PENDING:
+                continue
+            hypo = car.pending | {floor}
+            _, cost = astar(ElevatorProblem(car.floor, hypo))
+            marginal = cost - car.path_cost + (car.load() * 2.5) - min(wait * 1.3, 14)
+            if marginal < best_cost:
+                best_cost = marginal
+                best_car = car
+        if best_car:
+            best_car.add(floor)
+            self.queue.popleft()
+    def _loop(self):
+        for car in self.cars:
+            car.step()
+        if self.queue:
+            self._dispatch()
+        self._update_ui()
+        self.root.after(40, self._loop)
+    def _update_ui(self):
+        served = sum(c.served for c in self.cars)
+        dist = sum(c.dist for c in self.cars)
+        eff = f"{served / dist:.2f}" if dist > 0 else "—"
+        uptime = int(time.time() - self.start_time)
+        stats = (f"Uptime : {uptime}s\n"
+                 f"Served : {served}\n"
+                 f"Distance : {dist:.1f} floors\n"
+                 f"Efficiency : {eff} req/floor\n"
+                 f"Queue : {len(self.queue)}")
+        self.stats_var.set(stats)
+        mx = max(self.heat.values()) or 1
+        heat_text = ""
+        for f in range(10, -1, -1):
+            v = self.heat.get(f, 0)
+            if v > 0:
+                bar = "█" * int(v / mx * 14)
+                heat_text += f"L{f:2d} {bar} {v}\n"
+        self.heat_var.set(heat_text if heat_text else "No calls yet")
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = UltimateSystemV7_3(root)
+    App(root)
     root.mainloop()
